@@ -42,6 +42,8 @@ export interface SmoothControlsOptions {
   // A scalar in 0..1 that changes the dampening factor, corresponding to
   // factors from 0.05..0.3
   dampeningScale?: number;
+  // a percentage representing how much the model can be rotated beyond max min angles
+  overRotateAmount?: number;
   // Controls when events will be cancelled (always, or only when handled)
   eventHandlingBehavior?: EventHandlingBehavior;
   // Controls when interaction is allowed (always, or only when focused)
@@ -58,6 +60,7 @@ export const DEFAULT_OPTIONS = Object.freeze<SmoothControlsOptions>({
   decelerationMargin: 0.25,
   acceleration: 0.15,
   dampeningScale: 0.5,
+  overRotateAmount: 1,
   eventHandlingBehavior: 'prevent-all',
   interactionPolicy: 'allow-when-focused'
 });
@@ -84,6 +87,9 @@ const $upQuaternion = Symbol('upQuaternion');
 const $upQuaternionInverse = Symbol('upQuaternionInverse');
 const $spherical = Symbol('spherical');
 const $targetSpherical = Symbol('targetSpherical');
+const $clampedTargetSpherical = Symbol('clampedTargetSpherical');
+const $minOverSpherical = Symbol('minOverSpherical');
+const $maxOverSpherical = Symbol('maxOverSpherical');
 const $velocity = Symbol('velocity');
 const $dampeningFactor = Symbol('dampeningFactor');
 const $touchMode = Symbol('touchMode');
@@ -105,6 +111,7 @@ const $pixelLengthToSphericalAngle = Symbol('pixelLengthToSphericalAngle');
 const $positionToSpherical = Symbol('positionToSpherical');
 const $sphericalToPosition = Symbol('sphericalToPosition');
 const $twoTouchDistance = Symbol('twoTouchDistance');
+const $calculateOverSphericals = Symbol('calculateOverSphericals');
 
 // Event handlers
 const $onMouseMove = Symbol('onMouseMove');
@@ -180,6 +187,9 @@ export class SmoothControls extends EventDispatcher {
   private[$upQuaternionInverse]: Quaternion = new Quaternion();
   private[$spherical]: Spherical = new Spherical();
   private[$targetSpherical]: Spherical = new Spherical();
+  private[$clampedTargetSpherical]: Spherical = new Spherical();
+  private[$minOverSpherical]: Spherical = new Spherical();
+  private[$maxOverSpherical]: Spherical = new Spherical();
   private[$previousPosition]: Vector3 = new Vector3();
   private[$isUserChange]: boolean = false;
 
@@ -229,6 +239,7 @@ export class SmoothControls extends EventDispatcher {
     this[$previousPosition].copy(this.camera.position);
     this[$positionToSpherical](this.camera.position, this[$spherical]);
     this[$targetSpherical].copy(this[$spherical]);
+    this[$clampedTargetSpherical].copy(this[$targetSpherical]);
 
     this[$options] = Object.assign({}, DEFAULT_OPTIONS);
 
@@ -306,7 +317,10 @@ export class SmoothControls extends EventDispatcher {
     this.setOrbit();
     // Prevent interpolation in the case that any target spherical values
     // changed (preserving OrbitalControls behavior):
+    this[$targetSpherical].copy(this[$clampedTargetSpherical]);
     this[$spherical].copy(this[$targetSpherical]);
+
+    this[$calculateOverSphericals]();
   }
 
   /**
@@ -332,8 +346,6 @@ export class SmoothControls extends EventDispatcher {
       targetPhi: number = this[$targetSpherical].phi,
       targetRadius: number = this[$targetSpherical].radius): boolean {
     const {
-      minimumAzimuthalAngle,
-      maximumAzimuthalAngle,
       minimumPolarAngle,
       maximumPolarAngle,
       minimumRadius,
@@ -342,10 +354,24 @@ export class SmoothControls extends EventDispatcher {
 
     const {theta, phi, radius} = this[$targetSpherical];
 
-    const nextTheta =
-        clamp(targetTheta, minimumAzimuthalAngle!, maximumAzimuthalAngle!);
-    const nextPhi = clamp(targetPhi, minimumPolarAngle!, maximumPolarAngle!);
-    const nextRadius = clamp(targetRadius, minimumRadius!, maximumRadius!);
+    // currently we will not clamp theta / azimuthal angles
+    this[$clampedTargetSpherical].theta = targetTheta;
+
+    this[$clampedTargetSpherical].phi = clamp(
+      targetPhi,
+      minimumPolarAngle!,
+      maximumPolarAngle!
+    );
+    this[$clampedTargetSpherical].radius = clamp(
+      targetRadius,
+      minimumRadius!,
+      maximumRadius!
+    );
+    this[$clampedTargetSpherical].makeSafe();
+
+    const nextTheta = clamp(targetTheta, this[$minOverSpherical].theta, this[$maxOverSpherical].theta);
+    const nextPhi = clamp(targetPhi, this[$minOverSpherical].phi, this[$maxOverSpherical].phi);
+    const nextRadius = this[$clampedTargetSpherical].radius;
 
     if (nextTheta === theta && nextPhi === phi && nextRadius === radius) {
       return false;
@@ -378,9 +404,30 @@ export class SmoothControls extends EventDispatcher {
       boolean {
     const {theta, phi, radius} = this[$targetSpherical];
 
-    const targetTheta = theta - deltaTheta;
-    const targetPhi = phi - deltaPhi;
+    let targetPhi = phi - deltaPhi;
     const targetRadius = radius + deltaRadius;
+
+    const {
+      minimumPolarAngle: minPhi,
+      maximumPolarAngle: maxPhi,
+    } = this[$options];
+
+    let phiScale = 1;
+
+    if (targetPhi < minPhi!) {
+      phiScale = 1 - Math.min((targetPhi - minPhi!) / (this[$minOverSpherical].phi - minPhi!), 1);
+    }
+
+    if (targetPhi > maxPhi!) {
+      phiScale = 1 - Math.min((targetPhi - maxPhi!) / (this[$maxOverSpherical].phi - maxPhi!), 1);
+    }
+
+    targetPhi = phi - deltaPhi * phiScale;
+
+    // we adjust the deltaTheta based on phiScale
+    // because it makes this feel way more natural as if you
+    // can't rotate the object on theta axis because it's taut
+    const targetTheta = theta - deltaTheta * phiScale;
 
     return this.setOrbit(targetTheta, targetPhi, targetRadius);
   }
@@ -614,6 +661,11 @@ export class SmoothControls extends EventDispatcher {
   private[$handlePointerUp](_event: MouseEvent|TouchEvent) {
     this.element.style.cursor = 'grab';
     this[$pointerIsDown] = false;
+    this.setOrbit(
+      this[$clampedTargetSpherical].theta,
+      this[$clampedTargetSpherical].phi,
+      this[$clampedTargetSpherical].radius
+    );
   }
 
   private[$handleWheel](event: Event) {
@@ -669,5 +721,34 @@ export class SmoothControls extends EventDispatcher {
         event.cancelable) {
       event.preventDefault();
     }
+  }
+
+  [$calculateOverSphericals]() {
+    const {
+      minimumAzimuthalAngle,
+      maximumAzimuthalAngle,
+      minimumPolarAngle,
+      maximumPolarAngle,
+      minimumRadius,
+      maximumRadius,
+      overRotateAmount
+    } = this[$options];
+
+    const minOverRotatePolar = (0 - minimumPolarAngle!) * overRotateAmount! + minimumPolarAngle!;
+    const maxOverRotatePolar = (Math.PI - maximumPolarAngle!) * overRotateAmount! + maximumPolarAngle!;
+    const minOverRotateAzimuthal = minimumAzimuthalAngle!;
+    const maxOverRotateAzimuthal = maximumAzimuthalAngle!; 
+
+    this[$minOverSpherical].set(
+      minimumRadius!,
+      minOverRotatePolar,
+      minOverRotateAzimuthal,
+    );
+
+    this[$maxOverSpherical].set(
+      maximumRadius!,
+      maxOverRotatePolar,
+      maxOverRotateAzimuthal,
+    );
   }
 }
