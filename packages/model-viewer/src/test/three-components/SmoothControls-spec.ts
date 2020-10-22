@@ -14,10 +14,11 @@
  */
 
 import {PerspectiveCamera, Vector3} from 'three';
+import {IS_IE11} from '../../constants.js';
 
-import {ChangeSource, DEFAULT_OPTIONS, KeyCode, SmoothControls} from '../../three-components/SmoothControls.js';
-import {waitForEvent} from '../../utilities.js';
-import {dispatchSyntheticEvent} from '../helpers.js';
+import {DEFAULT_OPTIONS, KeyCode, SmoothControls} from '../../three-components/SmoothControls.js';
+// import {waitForEvent} from '../../utilities.js';
+import {dispatchSyntheticEvent, interactWith} from '../helpers.js';
 
 const expect = chai.expect;
 
@@ -27,9 +28,6 @@ const FIFTY_FRAME_DELTA = 50.0 * ONE_FRAME_DELTA;
 const HALF_PI = Math.PI / 2.0;
 const QUARTER_PI = HALF_PI / 2.0;
 const THREE_QUARTERS_PI = HALF_PI + QUARTER_PI;
-
-const USER_INTERACTION_CHANGE_SOURCE = 'user-interaction';
-const DEFAULT_INTERACTION_CHANGE_SOURCE = 'none';
 
 /**
  * Settle controls by performing 50 frames worth of updates
@@ -43,7 +41,7 @@ suite('SmoothControls', () => {
   let element: HTMLDivElement;
 
   setup(() => {
-    element = document.createElement<'div'>('div');
+    element = document.createElement('div');
     camera = new PerspectiveCamera();
     controls = new SmoothControls(camera, element);
 
@@ -248,39 +246,6 @@ suite('SmoothControls', () => {
         });
       });
 
-      suite('event handling', () => {
-        suite('prevent-all', () => {
-          setup(() => {
-            controls.applyOptions({
-              eventHandlingBehavior: 'prevent-all',
-              interactionPolicy: 'always-allow'
-            });
-          });
-
-          test('always preventDefaults handled, cancellable UI events', () => {
-            dispatchSyntheticEvent(element, 'mousedown');
-
-            const mousemove = dispatchSyntheticEvent(element, 'mousemove');
-
-            expect(mousemove.defaultPrevented).to.be.equal(true);
-          });
-        });
-
-        suite('prevent-handled', () => {
-          setup(() => {
-            controls.applyOptions({eventHandlingBehavior: 'prevent-handled'});
-          });
-
-          test('does not cancel unhandled UI events', () => {
-            dispatchSyntheticEvent(element, 'mousedown');
-
-            const mousemove = dispatchSyntheticEvent(element, 'mousemove');
-
-            expect(mousemove.defaultPrevented).to.be.equal(false);
-          });
-        });
-      });
-
       suite('interaction policy', () => {
         suite('allow-when-focused', () => {
           setup(() => {
@@ -303,14 +268,16 @@ suite('SmoothControls', () => {
           });
 
           test('does not orbit when pointing while blurred', () => {
-            const originalPhi = controls.getCameraSpherical().phi;
+            if (IS_IE11) {
+              return;  // Some stupid pointerEvents problem
+            }
+            const originalTheta = controls.getCameraSpherical().theta;
 
-            dispatchSyntheticEvent(
-                element, 'mousedown', {clientX: 0, clientY: 10});
-            dispatchSyntheticEvent(
-                element, 'mousemove', {clientX: 0, clientY: 0});
+            interactWith(element);
+            settleControls(controls);
 
-            expect(controls.getCameraSpherical().phi).to.be.equal(originalPhi);
+            expect(controls.getCameraSpherical().theta)
+                .to.be.equal(originalTheta);
           });
 
           test('does zoom when scrolling while focused', () => {
@@ -335,17 +302,16 @@ suite('SmoothControls', () => {
           });
 
           test('orbits when pointing, even while blurred', () => {
-            const originalPhi = controls.getCameraSpherical().phi;
+            if (IS_IE11) {
+              return;  // Some stupid pointerEvents problem
+            }
+            const originalTheta = controls.getCameraSpherical().theta;
 
-            dispatchSyntheticEvent(
-                element, 'mousedown', {clientX: 0, clientY: 10});
-            dispatchSyntheticEvent(
-                element, 'mousemove', {clientX: 0, clientY: 0});
-
+            interactWith(element);
             settleControls(controls);
 
-            expect(controls.getCameraSpherical().phi)
-                .to.be.greaterThan(originalPhi);
+            expect(controls.getCameraSpherical().theta)
+                .to.be.greaterThan(originalTheta);
           });
 
           test('zooms when scrolling, even while blurred', () => {
@@ -362,49 +328,37 @@ suite('SmoothControls', () => {
         });
 
         suite('events', () => {
-          test('dispatches "change" on user interaction', () => {
+          test('dispatches "change" event', () => {
             let didCall = false;
-            let changeSource;
 
-            controls.addEventListener('change', ({source}) => {
+            controls.addEventListener('change', () => {
               didCall = true;
-              changeSource = source;
             });
 
             dispatchSyntheticEvent(element, 'keydown', {keyCode: KeyCode.UP});
             settleControls(controls);
 
             expect(didCall).to.be.true;
-            expect(changeSource).to.equal(USER_INTERACTION_CHANGE_SOURCE);
           });
 
-          test('dispatches "change" on direct orbit change', () => {
+          test('no "change" on direct orbit change', () => {
             let didCall = false;
-            let changeSource;
 
-            controls.addEventListener('change', ({source}) => {
+            controls.addEventListener('change', () => {
               didCall = true;
-              changeSource = source;
             });
 
             controls.setOrbit(33, 33, 33);
             settleControls(controls);
 
-            expect(didCall).to.be.true;
-            expect(changeSource).to.equal(DEFAULT_INTERACTION_CHANGE_SOURCE);
+            expect(didCall).to.be.false;
           });
 
-          test('sends "user-interaction" multiple times', () => {
-            const expectedSources = [
-              USER_INTERACTION_CHANGE_SOURCE,
-              USER_INTERACTION_CHANGE_SOURCE,
-              USER_INTERACTION_CHANGE_SOURCE,
-              USER_INTERACTION_CHANGE_SOURCE,
-            ];
-            let changeSource: Array<string> = [];
+          test('sends "move" multiple times', () => {
+            let moves = 0;
 
-            controls.addEventListener('change', ({source}) => {
-              changeSource.push(source);
+            controls.addEventListener('move', () => {
+              ++moves;
             });
 
             dispatchSyntheticEvent(element, 'keydown', {keyCode: KeyCode.UP});
@@ -412,46 +366,7 @@ suite('SmoothControls', () => {
             controls.update(performance.now(), ONE_FRAME_DELTA);
             controls.update(performance.now(), ONE_FRAME_DELTA);
 
-            expect(changeSource).to.eql(expectedSources);
-          });
-
-          test('does not send "user-interaction" after setOrbit', () => {
-            const expectedSources = [
-              USER_INTERACTION_CHANGE_SOURCE,
-              USER_INTERACTION_CHANGE_SOURCE,
-              USER_INTERACTION_CHANGE_SOURCE,
-              DEFAULT_INTERACTION_CHANGE_SOURCE,
-              DEFAULT_INTERACTION_CHANGE_SOURCE,
-            ];
-            let changeSource: Array<string> = [];
-
-            controls.addEventListener('change', ({source}) => {
-              changeSource.push(source);
-            });
-
-            dispatchSyntheticEvent(element, 'keydown', {keyCode: KeyCode.UP});
-
-            controls.update(performance.now(), ONE_FRAME_DELTA);
-            controls.update(performance.now(), ONE_FRAME_DELTA);
-
-            controls.setOrbit(3, 3, 3);
-
-            controls.update(performance.now(), ONE_FRAME_DELTA);
-            controls.update(performance.now(), ONE_FRAME_DELTA);
-
-            expect(changeSource).to.eql(expectedSources);
-          });
-
-          suite('simultaneous user and imperative interaction', () => {
-            test('reports source as user interaction', async () => {
-              const eventDispatches = waitForEvent(controls, 'change');
-              controls.adjustOrbit(1, 1, 1);
-              dispatchSyntheticEvent(element, 'keydown', {keyCode: KeyCode.UP});
-              settleControls(controls);
-
-              const event: any = await eventDispatches;
-              expect(event.source).to.be.equal(ChangeSource.USER_INTERACTION);
-            });
+            expect(moves).to.eql(3);
           });
         });
       });

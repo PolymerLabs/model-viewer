@@ -16,12 +16,12 @@
 import {Camera, Vector3} from 'three';
 
 import {IS_IE11} from '../../constants.js';
-import {$controls, $promptAnimatedContainer, $promptElement, CameraChangeDetails, cameraOrbitIntrinsics, ControlsInterface, ControlsMixin, INTERACTION_PROMPT, SphericalPosition} from '../../features/controls.js';
+import {$controls, $promptAnimatedContainer, $promptElement, cameraOrbitIntrinsics, ControlsInterface, ControlsMixin, INTERACTION_PROMPT, SphericalPosition} from '../../features/controls.js';
 import ModelViewerElementBase, {$canvas, $scene, $userInputElement, Vector3D} from '../../model-viewer-base.js';
 import {StyleEvaluator} from '../../styles/evaluators.js';
-import {ChangeSource, SmoothControls} from '../../three-components/SmoothControls.js';
+import {SmoothControls} from '../../three-components/SmoothControls.js';
 import {Constructor, step, waitForEvent} from '../../utilities.js';
-import {assetPath, dispatchSyntheticEvent, rafPasses, timePasses, until} from '../helpers.js';
+import {assetPath, interactWith, rafPasses, timePasses, until} from '../helpers.js';
 import {BasicSpecTemplate} from '../templates.js';
 import {settleControls} from '../three-components/SmoothControls-spec.js';
 
@@ -30,11 +30,6 @@ const DEFAULT_FOV = 45;
 const DEFAULT_MIN_FOV = 25;
 const DEFAULT_MAX_FOV = 45;
 const ASTRONAUT_GLB_PATH = assetPath('models/Astronaut.glb');
-
-const interactWith = (element: HTMLElement) => {
-  dispatchSyntheticEvent(element, 'mousedown', {clientX: 0, clientY: 10});
-  dispatchSyntheticEvent(element, 'mousemove', {clientX: 0, clientY: 0});
-};
 
 const expectSphericalsToBeEqual =
     (sphericalOne: SphericalPosition, sphericalTwo: SphericalPosition) => {
@@ -263,18 +258,18 @@ suite('ModelViewerElementBase with ControlsMixin', () => {
         await cameraChangeDispatches;
       });
 
-      test('sets an appropriate event source', async () => {
-        const cameraChangeDispatches =
-            waitForEvent<CustomEvent<CameraChangeDetails>>(
-                element, 'camera-change');
+      // test('sets an appropriate event source', async () => {
+      //   const cameraChangeDispatches =
+      //       waitForEvent<CustomEvent<CameraChangeDetails>>(
+      //           element, 'camera-change');
 
-        const cameraOrbit = element.getCameraOrbit();
-        element.cameraOrbit = `${cameraOrbit.theta + 1}rad ${
-            cameraOrbit.phi}rad ${cameraOrbit.radius}m`;
+      //   const cameraOrbit = element.getCameraOrbit();
+      //   element.cameraOrbit = `${cameraOrbit.theta + 1}rad ${
+      //       cameraOrbit.phi}rad ${cameraOrbit.radius}m`;
 
-        const event = await cameraChangeDispatches;
-        expect(event.detail.source).to.be.equal(ChangeSource.NONE);
-      });
+      //   const event = await cameraChangeDispatches;
+      //   expect(event.detail.source).to.be.equal(ChangeSource.NONE);
+      // });
 
 
       suite('getCameraOrbit', () => {
@@ -494,21 +489,21 @@ suite('ModelViewerElementBase with ControlsMixin', () => {
         expect(controls.interactionEnabled).to.be.false;
       });
 
-      suite('when user is interacting', () => {
-        test('sets an appropriate camera-change event source', async () => {
-          await rafPasses();
-          element[$userInputElement].focus();
-          interactWith(element[$userInputElement]);
+      // suite('when user is interacting', () => {
+      //   test('sets an appropriate camera-change event source', async () => {
+      //     await rafPasses();
+      //     element[$userInputElement].focus();
+      //     interactWith(element[$userInputElement]);
 
-          const cameraChangeDispatches =
-              waitForEvent<CustomEvent<CameraChangeDetails>>(
-                  element, 'camera-change');
-          const event = await cameraChangeDispatches;
+      //     const cameraChangeDispatches =
+      //         waitForEvent<CustomEvent<CameraChangeDetails>>(
+      //             element, 'camera-change');
+      //     const event = await cameraChangeDispatches;
 
-          expect(event.detail.source)
-              .to.be.equal(ChangeSource.USER_INTERACTION);
-        });
-      });
+      //     expect(event.detail.source)
+      //         .to.be.equal(ChangeSource.USER_INTERACTION);
+      //   });
+      // });
 
       suite('interaction-prompt', () => {
         test('can be configured to never appear', async () => {

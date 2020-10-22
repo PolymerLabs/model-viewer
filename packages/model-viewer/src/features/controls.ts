@@ -22,7 +22,7 @@ import {degreesToRadians, normalizeUnit} from '../styles/conversions.js';
 import {EvaluatedStyle, Intrinsics, SphericalIntrinsics, StyleEvaluator, Vector3Intrinsics} from '../styles/evaluators.js';
 import {IdentNode, NumberNode, numberNode, parseExpressions} from '../styles/parsers.js';
 import {SAFE_RADIUS_RATIO} from '../three-components/Model.js';
-import {ChangeEvent, ChangeSource, PointerChangeEvent, SmoothControls} from '../three-components/SmoothControls.js';
+import {PointerChangeEvent, SmoothControls} from '../three-components/SmoothControls.js';
 import {Constructor} from '../utilities.js';
 import {timeline} from '../utilities/animation.js';
 
@@ -64,10 +64,6 @@ const POLAR_TRIENT_LABELS = ['upper-', '', 'lower-'];
 export const DEFAULT_INTERACTION_PROMPT_THRESHOLD = 3000;
 export const INTERACTION_PROMPT =
     'Use mouse, touch or arrow keys to control the camera!';
-
-export interface CameraChangeDetails {
-  source: ChangeSource;
-}
 
 export interface SphericalPosition {
   theta: number;  // equator angle around the y (up) axis.
@@ -193,19 +189,19 @@ const $deferInteractionPrompt = Symbol('deferInteractionPrompt');
 const $updateAria = Symbol('updateAria');
 const $updateCameraForRadius = Symbol('updateCameraForRadius');
 
-const $blurHandler = Symbol('blurHandler');
-const $focusHandler = Symbol('focusHandler');
-const $changeHandler = Symbol('changeHandler');
-const $pointerChangeHandler = Symbol('pointerChangeHandler');
-
 const $onBlur = Symbol('onBlur');
 const $onFocus = Symbol('onFocus');
+const $onMove = Symbol('onMove');
 const $onChange = Symbol('onChange');
+const $onCancel = Symbol('onCancel');
 const $onPointerChange = Symbol('onPointerChange');
 
 const $waitingToPromptUser = Symbol('waitingToPromptUser');
 const $userHasInteracted = Symbol('userHasInteracted');
 const $promptElementVisibleTime = Symbol('promptElementVisibleTime');
+const $waitingToPromptUserOld = Symbol('waitingToPromptUserOld');
+const $userHasInteractedOld = Symbol('userHasInteractedOld');
+const $promptElementVisibleTimeOld = Symbol('promptElementVisibleTimeOld');
 const $lastPromptOffset = Symbol('lastPromptOffset');
 const $focusedTime = Symbol('focusedTime');
 
@@ -336,8 +332,11 @@ export const ControlsMixin = <T extends Constructor<ModelViewerElementBase>>(
     protected[$focusedTime] = Infinity;
     protected[$lastPromptOffset] = 0;
     protected[$promptElementVisibleTime] = Infinity;
+    protected[$promptElementVisibleTimeOld] = Infinity;
     protected[$userHasInteracted] = false;
+    protected[$userHasInteractedOld] = false;
     protected[$waitingToPromptUser] = false;
+    protected[$waitingToPromptUserOld] = false;
 
     protected[$controls] = new SmoothControls(
         this[$scene].camera as PerspectiveCamera, this[$userInputElement]);
@@ -347,15 +346,6 @@ export const ControlsMixin = <T extends Constructor<ModelViewerElementBase>>(
     protected[$jumpCamera] = false;
     protected[$initialized] = false;
     protected[$maintainThetaPhi] = false;
-
-    protected[$changeHandler] = (event: Event) =>
-        this[$onChange](event as ChangeEvent);
-
-    protected[$pointerChangeHandler] = (event: Event) =>
-        this[$onPointerChange](event as PointerChangeEvent);
-
-    protected[$focusHandler] = () => this[$onFocus]();
-    protected[$blurHandler] = () => this[$onBlur]();
 
     getCameraOrbit(): SphericalPosition {
       const {theta, phi, radius} = this[$lastSpherical];
@@ -396,21 +386,25 @@ export const ControlsMixin = <T extends Constructor<ModelViewerElementBase>>(
     connectedCallback() {
       super.connectedCallback();
 
-      this[$controls].addEventListener('change', this[$changeHandler]);
+      this[$controls].addEventListener('move', this[$onMove]);
+      this[$controls].addEventListener('change', this[$onChange]);
+      this[$controls].addEventListener('cancel', this[$onCancel]);
       this[$controls].addEventListener(
-          'pointer-change-start', this[$pointerChangeHandler]);
+          'pointer-change-start', this[$onPointerChange]);
       this[$controls].addEventListener(
-          'pointer-change-end', this[$pointerChangeHandler]);
+          'pointer-change-end', this[$onPointerChange]);
     }
 
     disconnectedCallback() {
       super.disconnectedCallback();
 
-      this[$controls].removeEventListener('change', this[$changeHandler]);
+      this[$controls].removeEventListener('move', this[$onMove]);
+      this[$controls].removeEventListener('change', this[$onChange]);
+      this[$controls].removeEventListener('cancel', this[$onCancel]);
       this[$controls].removeEventListener(
-          'pointer-change-start', this[$pointerChangeHandler]);
+          'pointer-change-start', this[$onPointerChange]);
       this[$controls].removeEventListener(
-          'pointer-change-end', this[$pointerChangeHandler]);
+          'pointer-change-end', this[$onPointerChange]);
     }
 
     updated(changedProperties: Map<string|number|symbol, unknown>) {
@@ -426,11 +420,11 @@ export const ControlsMixin = <T extends Constructor<ModelViewerElementBase>>(
             this[$waitingToPromptUser] = true;
           }
 
-          input.addEventListener('focus', this[$focusHandler]);
-          input.addEventListener('blur', this[$blurHandler]);
+          input.addEventListener('focus', this[$onFocus]);
+          input.addEventListener('blur', this[$onBlur]);
         } else {
-          input.removeEventListener('focus', this[$focusHandler]);
-          input.removeEventListener('blur', this[$blurHandler]);
+          input.removeEventListener('focus', this[$onFocus]);
+          input.removeEventListener('blur', this[$onBlur]);
 
           controls.disableInteraction();
           this[$deferInteractionPrompt]();
@@ -672,7 +666,7 @@ export const ControlsMixin = <T extends Constructor<ModelViewerElementBase>>(
       this.jumpCameraToGoal();
     }
 
-    [$onFocus]() {
+    [$onFocus] = () => {
       const input = this[$userInputElement];
 
       if (!isFinite(this[$focusedTime])) {
@@ -694,9 +688,9 @@ export const ControlsMixin = <T extends Constructor<ModelViewerElementBase>>(
           !this[$userHasInteracted]) {
         this[$waitingToPromptUser] = true;
       }
-    }
+    };
 
-    [$onBlur]() {
+    [$onBlur] = () => {
       if (this.interactionPrompt !== InteractionPromptStrategy.WHEN_FOCUSED) {
         return;
       }
@@ -706,28 +700,46 @@ export const ControlsMixin = <T extends Constructor<ModelViewerElementBase>>(
 
       this[$promptElementVisibleTime] = Infinity;
       this[$focusedTime] = Infinity;
-    }
+    };
 
-    [$onChange]({source}: ChangeEvent) {
+    [$onMove] = () => {
       this[$updateAria]();
       this[$needsRender]();
+      this.dispatchEvent(new CustomEvent('camera-change'));
+    };
 
-      if (source === ChangeSource.USER_INTERACTION) {
-        this[$userHasInteracted] = true;
-        this[$deferInteractionPrompt]();
+    [$onChange] = () => {
+      this.dispatchEvent(new CustomEvent('user-interaction'));
+      if (this[$userHasInteracted]) {
+        return;
       }
+      this[$userHasInteractedOld] = this[$userHasInteracted];
+      this[$waitingToPromptUserOld] = this[$waitingToPromptUser];
+      this[$promptElementVisibleTimeOld] = this[$promptElementVisibleTime];
 
-      this.dispatchEvent(new CustomEvent<CameraChangeDetails>(
-          'camera-change', {detail: {source}}));
-    }
+      this[$userHasInteracted] = true;
+      this[$deferInteractionPrompt]();
+    };
 
-    [$onPointerChange](event: PointerChangeEvent) {
-      if (event.type === 'pointer-change-start') {
+    [$onCancel] = () => {
+      this[$userHasInteracted] = this[$userHasInteractedOld];
+      this[$waitingToPromptUser] = this[$waitingToPromptUserOld];
+      if (Number.isFinite(this[$promptElementVisibleTimeOld])) {
+        this[$promptElementVisibleTime] = this[$promptElementVisibleTimeOld];
+        this[$promptElement].classList.add('visible');
+      }
+    };
+
+    [$onPointerChange] = (event: Event) => {
+      if ((event as PointerChangeEvent).type === 'pointer-change-start') {
         this[$container].classList.add('pointer-tumbling');
       } else {
         this[$container].classList.remove('pointer-tumbling');
+        this[$userHasInteractedOld] = this[$userHasInteracted];
+        this[$waitingToPromptUserOld] = this[$waitingToPromptUser];
+        this[$promptElementVisibleTimeOld] = this[$promptElementVisibleTime];
       }
-    }
+    };
   }
 
   return ControlsModelViewerElement;

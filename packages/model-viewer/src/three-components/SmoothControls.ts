@@ -17,9 +17,8 @@ import {Euler, Event as ThreeEvent, EventDispatcher, PerspectiveCamera, Spherica
 import {clamp} from '../utilities.js';
 import {Damper, SETTLING_TIME} from './Damper.js';
 
-export type EventHandlingBehavior = 'prevent-all'|'prevent-handled';
 export type InteractionPolicy = 'always-allow'|'allow-when-focused';
-export type TouchMode = 'rotate'|'zoom';
+export type TouchMode = 'rotate'|'zoom'|'none';
 
 export interface Pointer {
   clientX: number, clientY: number,
@@ -42,8 +41,6 @@ export interface SmoothControlsOptions {
   minimumFieldOfView?: number;
   // The maximum camera field of view in degrees
   maximumFieldOfView?: number;
-  // Controls when events will be cancelled (always, or only when handled)
-  eventHandlingBehavior?: EventHandlingBehavior;
   // Controls when interaction is allowed (always, or only when focused)
   interactionPolicy?: InteractionPolicy;
 }
@@ -57,12 +54,10 @@ export const DEFAULT_OPTIONS = Object.freeze<SmoothControlsOptions>({
   maximumAzimuthalAngle: Infinity,
   minimumFieldOfView: 10,
   maximumFieldOfView: 45,
-  eventHandlingBehavior: 'prevent-all',
   interactionPolicy: 'always-allow'
 });
 
 // Constants
-const TOUCH_EVENT_RE = /^touch(start|end|move)$/;
 const KEYBOARD_ORBIT_INCREMENT = Math.PI / 8;
 const ZOOM_SENSITIVITY = 0.04;
 
@@ -74,25 +69,6 @@ export const KeyCode = {
   RIGHT: 39,
   DOWN: 40
 };
-
-export type ChangeSource = 'user-interaction'|'none';
-
-export const ChangeSource: {[index: string]: ChangeSource} = {
-  USER_INTERACTION: 'user-interaction',
-  NONE: 'none'
-};
-
-/**
- * ChangEvents are dispatched whenever the camera position or orientation has
- * changed
- */
-export interface ChangeEvent extends ThreeEvent {
-  /**
-   * determines what was the originating reason for the change event eg user or
-   * none
-   */
-  source: ChangeSource,
-}
 
 export interface PointerChangeEvent extends ThreeEvent {
   type: 'pointer-change-start'|'pointer-change-end';
@@ -122,7 +98,6 @@ export class SmoothControls extends EventDispatcher {
 
   private _interactionEnabled: boolean = false;
   private _options: SmoothControlsOptions;
-  private isUserChange = false;
   private isUserPointing = false;
 
   // Internal orbital position state
@@ -136,13 +111,10 @@ export class SmoothControls extends EventDispatcher {
   private fovDamper = new Damper();
 
   // Pointer state
-  private pointerIsDown = false;
-  private lastPointerPosition: Pointer = {
-    clientX: 0,
-    clientY: 0,
-  };
-  private lastTouches!: TouchList;
-  private touchMode: TouchMode = 'rotate';
+  private primaryPointer!: PointerEvent;
+  private secondaryPointer!: PointerEvent;
+  private lastPointerSeparation = 0;
+  private touchMode: TouchMode = 'none';
 
   constructor(
       readonly camera: PerspectiveCamera, readonly element: HTMLElement) {
@@ -162,16 +134,12 @@ export class SmoothControls extends EventDispatcher {
   enableInteraction() {
     if (this._interactionEnabled === false) {
       const {element} = this;
-      element.addEventListener('mousemove', this.onPointerMove);
-      element.addEventListener('mousedown', this.onPointerDown);
-      element.addEventListener('wheel', this.onWheel);
+      element.addEventListener('pointermove', this.onPointerMove);
+      element.addEventListener('pointerdown', this.onPointerDown);
+      element.addEventListener('pointercancel', this.onPointerCancel);
+      self.addEventListener('pointerup', this.onPointerUp);
+      element.addEventListener('wheel', this.onWheel, {passive: false});
       element.addEventListener('keydown', this.onKeyDown);
-      element.addEventListener(
-          'touchstart', this.onPointerDown, {passive: true});
-      element.addEventListener('touchmove', this.onPointerMove);
-
-      self.addEventListener('mouseup', this.onPointerUp);
-      self.addEventListener('touchend', this.onPointerUp);
 
       this.element.style.cursor = 'grab';
       this._interactionEnabled = true;
@@ -181,16 +149,12 @@ export class SmoothControls extends EventDispatcher {
   disableInteraction() {
     if (this._interactionEnabled === true) {
       const {element} = this;
-
-      element.removeEventListener('mousemove', this.onPointerMove);
-      element.removeEventListener('mousedown', this.onPointerDown);
+      element.removeEventListener('pointermove', this.onPointerMove);
+      element.removeEventListener('pointerdown', this.onPointerDown);
+      element.removeEventListener('pointercancel', this.onPointerCancel);
+      self.removeEventListener('pointerup', this.onPointerUp);
       element.removeEventListener('wheel', this.onWheel);
       element.removeEventListener('keydown', this.onKeyDown);
-      element.removeEventListener('touchstart', this.onPointerDown);
-      element.removeEventListener('touchmove', this.onPointerMove);
-
-      self.removeEventListener('mouseup', this.onPointerUp);
-      self.removeEventListener('touchend', this.onPointerUp);
 
       element.style.cursor = '';
       this._interactionEnabled = false;
@@ -295,8 +259,6 @@ export class SmoothControls extends EventDispatcher {
     this.goalSpherical.radius = nextRadius;
     this.goalSpherical.makeSafe();
 
-    this.isUserChange = false;
-
     return true;
   }
 
@@ -324,8 +286,7 @@ export class SmoothControls extends EventDispatcher {
    * The deltaZoom parameter adjusts both the field of view and the orbit radius
    * such that they progress across their allowed ranges in sync.
    */
-  adjustOrbit(deltaTheta: number, deltaPhi: number, deltaZoom: number):
-      boolean {
+  adjustOrbit(deltaTheta: number, deltaPhi: number, deltaZoom: number) {
     const {theta, phi, radius} = this.goalSpherical;
     const {
       minimumRadius,
@@ -352,15 +313,12 @@ export class SmoothControls extends EventDispatcher {
             Math.min(
                 isFinite(deltaRatio) ? deltaRatio : Infinity,
                 maximumRadius! - minimumRadius!);
-    let handled = this.setOrbit(goalTheta, goalPhi, goalRadius);
+    this.setOrbit(goalTheta, goalPhi, goalRadius);
 
     if (deltaZoom !== 0) {
       const goalLogFov = this.goalLogFov + deltaZoom;
       this.setFieldOfView(Math.exp(goalLogFov));
-      handled = true;
     }
-
-    return handled;
   }
 
   /**
@@ -425,10 +383,7 @@ export class SmoothControls extends EventDispatcher {
       this.camera.updateProjectionMatrix();
     }
 
-    const source =
-        this.isUserChange ? ChangeSource.USER_INTERACTION : ChangeSource.NONE;
-
-    this.dispatchEvent({type: 'change', source});
+    this.dispatchEvent({type: 'move'});
   }
 
   private get canInteract(): boolean {
@@ -441,18 +396,11 @@ export class SmoothControls extends EventDispatcher {
   }
 
   private userAdjustOrbit(
-      deltaTheta: number, deltaPhi: number, deltaZoom: number): boolean {
-    const handled = this.adjustOrbit(
+      deltaTheta: number, deltaPhi: number, deltaZoom: number) {
+    this.adjustOrbit(
         deltaTheta * this.sensitivity, deltaPhi * this.sensitivity, deltaZoom);
 
-    this.isUserChange = true;
-    // Always make sure that an initial event is triggered in case there is
-    // contention between user interaction and imperative changes. This initial
-    // event will give external observers that chance to observe that
-    // interaction occurred at all:
-    this.dispatchEvent({type: 'change', source: ChangeSource.USER_INTERACTION});
-
-    return handled;
+    this.dispatchEvent({type: 'change'});
   }
 
   // Wraps to bewteen -pi and pi
@@ -462,115 +410,92 @@ export class SmoothControls extends EventDispatcher {
     return wrapped * 2 * Math.PI - Math.PI;
   }
 
-  private pixelLengthToSphericalAngle(pixelLength: number): number {
+  private pixelsToRadians(pixelLength: number): number {
     return 2 * Math.PI * pixelLength / this.element.clientHeight;
   }
 
-  private twoTouchDistance(touchOne: Touch, touchTwo: Touch): number {
-    const {clientX: xOne, clientY: yOne} = touchOne;
-    const {clientX: xTwo, clientY: yTwo} = touchTwo;
+  private updatePointerSeparation() {
+    const {clientX: xOne, clientY: yOne} = this.primaryPointer;
+    const {clientX: xTwo, clientY: yTwo} = this.secondaryPointer;
     const xDelta = xTwo - xOne;
     const yDelta = yTwo - yOne;
 
-    return Math.sqrt(xDelta * xDelta + yDelta * yDelta);
+    this.lastPointerSeparation = Math.sqrt(xDelta * xDelta + yDelta * yDelta);
   }
 
-  private onPointerMove = (event: MouseEvent|TouchEvent) => {
-    if (!this.pointerIsDown || !this.canInteract) {
+  private onPointerMove = (event: PointerEvent) => {
+    if (this.touchMode === 'none' || !this.canInteract) {
       return;
     }
 
-    let handled = false;
+    const lastX = this.primaryPointer.clientX;
+    const lastY = this.primaryPointer.clientY;
 
-    // NOTE(cdata): We test event.type as some browsers do not have a global
-    // TouchEvent contructor.
-    if (TOUCH_EVENT_RE.test(event.type)) {
-      const {touches} = event as TouchEvent;
-
-      switch (this.touchMode) {
-        case 'zoom':
-          if (this.lastTouches.length > 1 && touches.length > 1) {
-            const lastTouchDistance =
-                this.twoTouchDistance(this.lastTouches[0], this.lastTouches[1]);
-            const touchDistance = this.twoTouchDistance(touches[0], touches[1]);
-            const deltaZoom =
-                ZOOM_SENSITIVITY * (lastTouchDistance - touchDistance) / 10.0;
-
-            handled = this.userAdjustOrbit(0, 0, deltaZoom);
-          }
-
-          break;
-        case 'rotate':
-          handled = this.handleSinglePointerMove(touches[0]);
-          break;
-      }
-
-      this.lastTouches = touches;
+    if (event.isPrimary) {
+      this.primaryPointer = event;
+    } else if (event.pointerId === this.secondaryPointer.pointerId) {
+      this.secondaryPointer = event;
     } else {
-      handled = this.handleSinglePointerMove(event as MouseEvent);
+      return;
     }
 
-    if ((handled || this._options.eventHandlingBehavior === 'prevent-all') &&
-        event.cancelable) {
-      event.preventDefault();
-    };
+    switch (this.touchMode) {
+      case 'zoom':
+        const lastTouchDistance = this.lastPointerSeparation;
+        this.updatePointerSeparation();
+        const touchDistance = this.lastPointerSeparation;
+        const deltaZoom =
+            ZOOM_SENSITIVITY * (lastTouchDistance - touchDistance) / 10.0;
+
+        this.userAdjustOrbit(0, 0, deltaZoom);
+        break;
+      case 'rotate':
+        const {clientX, clientY} = this.primaryPointer;
+        const deltaTheta = this.pixelsToRadians(clientX - lastX);
+        const deltaPhi = this.pixelsToRadians(clientY - lastY);
+
+        this.userAdjustOrbit(deltaTheta, deltaPhi, 0);
+
+        if (this.isUserPointing === false) {
+          this.isUserPointing = true;
+          this.dispatchEvent(
+              {type: 'pointer-change-start', pointer: {...event}});
+        }
+        break;
+    }
   };
 
-  private handleSinglePointerMove(pointer: Pointer): boolean {
-    const {clientX, clientY} = pointer;
-    const deltaTheta = this.pixelLengthToSphericalAngle(
-        clientX - this.lastPointerPosition.clientX);
-    const deltaPhi = this.pixelLengthToSphericalAngle(
-        clientY - this.lastPointerPosition.clientY);
-
-    this.lastPointerPosition.clientX = clientX;
-    this.lastPointerPosition.clientY = clientY;
-
-    if (this.isUserPointing === false) {
-      this.isUserPointing = true;
-      this.dispatchEvent({type: 'pointer-change-start', pointer: {...pointer}});
-    }
-
-    return this.userAdjustOrbit(deltaTheta, deltaPhi, 0);
-  }
-
-  private onPointerDown = (event: MouseEvent|TouchEvent) => {
-    this.pointerIsDown = true;
+  private onPointerDown = (event: PointerEvent) => {
     this.isUserPointing = false;
-
-    if (TOUCH_EVENT_RE.test(event.type)) {
-      const {touches} = event as TouchEvent;
-
-      switch (touches.length) {
-        default:
-        case 1:
-          this.touchMode = 'rotate';
-          this.handleSinglePointerDown(touches[0]);
-          break;
-        case 2:
-          this.touchMode = 'zoom';
-          break;
-      }
-
-      this.lastTouches = touches;
+    if (event.isPrimary) {
+      this.touchMode = 'rotate';
+      this.primaryPointer = event;
+      this.element.style.cursor = 'grabbing';
     } else {
-      this.handleSinglePointerDown(event as MouseEvent);
+      if (this.touchMode === 'none') {
+        return;
+      }
+      this.touchMode = 'zoom';
+      this.secondaryPointer = event;
+      this.updatePointerSeparation();
     }
   };
 
-  private handleSinglePointerDown(pointer: Pointer) {
-    this.lastPointerPosition.clientX = pointer.clientX;
-    this.lastPointerPosition.clientY = pointer.clientY;
-    this.element.style.cursor = 'grabbing';
-  }
+  private onPointerCancel = () => {
+    this.touchMode = 'none';
+    this.dispatchEvent({type: 'cancel'});
+  };
 
-  private onPointerUp = (_event: MouseEvent|TouchEvent) => {
+  private onPointerUp = (event: PointerEvent) => {
+    if (this.touchMode !== 'none' &&
+        (event.isPrimary ||
+         event.pointerId === this.secondaryPointer.pointerId)) {
+      this.touchMode = 'none';
+    }
     this.element.style.cursor = 'grab';
-    this.pointerIsDown = false;
 
     if (this.isUserPointing) {
-      this.dispatchEvent(
-          {type: 'pointer-change-end', pointer: {...this.lastPointerPosition}});
+      this.dispatchEvent({type: 'pointer-change-end', pointer: {...event}});
     }
   };
 
@@ -581,51 +506,45 @@ export class SmoothControls extends EventDispatcher {
 
     const deltaZoom = (event as WheelEvent).deltaY *
         ((event as WheelEvent).deltaMode == 1 ? 18 : 1) * ZOOM_SENSITIVITY / 30;
+    this.userAdjustOrbit(0, 0, deltaZoom);
 
-    if ((this.userAdjustOrbit(0, 0, deltaZoom) ||
-         this._options.eventHandlingBehavior === 'prevent-all') &&
-        event.cancelable) {
-      event.preventDefault();
-    }
+    event.preventDefault();
   };
 
   private onKeyDown = (event: KeyboardEvent) => {
     // We track if the key is actually one we respond to, so as not to
     // accidentally clober unrelated key inputs when the <model-viewer> has
-    // focus and eventHandlingBehavior is set to 'prevent-all'.
+    // focus.
     let relevantKey = false;
-    let handled = false;
 
     switch (event.keyCode) {
       case KeyCode.PAGE_UP:
         relevantKey = true;
-        handled = this.userAdjustOrbit(0, 0, ZOOM_SENSITIVITY);
+        this.userAdjustOrbit(0, 0, ZOOM_SENSITIVITY);
         break;
       case KeyCode.PAGE_DOWN:
         relevantKey = true;
-        handled = this.userAdjustOrbit(0, 0, -1 * ZOOM_SENSITIVITY);
+        this.userAdjustOrbit(0, 0, -1 * ZOOM_SENSITIVITY);
         break;
       case KeyCode.UP:
         relevantKey = true;
-        handled = this.userAdjustOrbit(0, -KEYBOARD_ORBIT_INCREMENT, 0);
+        this.userAdjustOrbit(0, -KEYBOARD_ORBIT_INCREMENT, 0);
         break;
       case KeyCode.DOWN:
         relevantKey = true;
-        handled = this.userAdjustOrbit(0, KEYBOARD_ORBIT_INCREMENT, 0);
+        this.userAdjustOrbit(0, KEYBOARD_ORBIT_INCREMENT, 0);
         break;
       case KeyCode.LEFT:
         relevantKey = true;
-        handled = this.userAdjustOrbit(-KEYBOARD_ORBIT_INCREMENT, 0, 0);
+        this.userAdjustOrbit(-KEYBOARD_ORBIT_INCREMENT, 0, 0);
         break;
       case KeyCode.RIGHT:
         relevantKey = true;
-        handled = this.userAdjustOrbit(KEYBOARD_ORBIT_INCREMENT, 0, 0);
+        this.userAdjustOrbit(KEYBOARD_ORBIT_INCREMENT, 0, 0);
         break;
     }
 
-    if (relevantKey &&
-        (handled || this._options.eventHandlingBehavior === 'prevent-all') &&
-        event.cancelable) {
+    if (relevantKey) {
       event.preventDefault();
     }
   };
