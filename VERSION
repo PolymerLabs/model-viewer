@@ -1,0 +1,11 @@
+commit b41527f559dd5ade5e42e22cbe7dd906c00be837
+Author: Samaneh <3915613+asemanh@users.noreply.github.com>
+Date:   Thu Jul 22 17:19:03 2021 -0700
+
+    Upgrade to NPM 7 (#2603)
+    
+    * upgrade to npm7 by running npm run update
+    
+    * run npm run upgrade
+    
+    * simplifing update scripts
